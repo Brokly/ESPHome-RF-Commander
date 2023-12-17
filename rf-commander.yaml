@@ -1,0 +1,160 @@
+substitutions:
+  devicename: rf-commander
+  upper_devicename: "RF Commander"
+  location: На чердаке
+  hardware: SonOff RF-433
+  wifi_ip: !secret ip_rf_commander
+
+packages:
+  device_base: !include __device_base.yaml
+
+esphome:
+  platform: ESP8266
+  board: esp01_1m
+
+api:
+  services:
+    - service: send_rf_raw
+      variables:
+        data: int # данные для передачи, возможно то, что насканировали
+        proto: int # номер протокола
+        nbits: int # количество битов в посылке
+      then:
+        - lambda: |-
+            send_rf->execute(data, proto, nbits);    
+
+  
+binary_sensor:
+# кнопка
+  - platform: gpio
+    pin:
+      number: GPIO0
+      inverted: true
+    internal: true
+    name: ${upper_devicename} Button
+    id: button_id
+# restart esp
+    on_click:
+      min_length: 4000ms
+      max_length: 6000ms
+      then:
+        - switch.toggle: restart_sw
+
+output:
+  # светодиод устройства
+  - platform: esp8266_pwm
+    id: led_id
+    pin: 
+      number: GPIO13
+      inverted: false
+
+light:
+  - platform: monochromatic
+    name: ${upper_devicename} Led
+    internal: true
+    output: led_id
+    id: led
+
+status_led:
+  pin:
+    number: GPIO13
+    inverted: yes
+
+time:
+  #нужна синхронизация времени
+  - platform: sntp
+    id: sntp_time
+
+remote_receiver:
+  pin:
+    number: GPIO4
+    #inverted: true
+  tolerance: 50%
+  filter: 4us
+  idle: 4ms
+  on_rc_switch:
+     - lambda: |-
+         // эта строка выдаст в лог коды в шестнадцатиричном (сжатом) виде, однако тут количество бит будет не понятно
+         ESP_LOGD("RC Commander", "Code:%x%08x , Proto:%d", (uint32_t)(x.code>>32), (uint32_t)x.code, x.protocol); 
+         if(x.protocol==1){
+            if(x.code==0x65602){
+            } else if(x.code==0x65608){
+            } else if(x.code==0xff5f78){
+            } else if(x.code==4){
+            } else if(x.code==5){
+            }
+         } else if(x.protocol==6){
+            if(x.code==0xff5f71){
+            } else if(x.code==0xff5f78){
+            }
+         }
+  dump: rc_switch
+
+remote_transmitter:
+  id: transmitter
+  pin:
+    number: GPIO5
+  carrier_duty_percent: 100%
+
+script:
+#  # скрипт отправки RF в виде цифры
+#  # clumsily, through text conversion
+#  - id: send_rf_str
+#    mode: queued
+#    parameters:
+#      data: uint64_t # данные для передачи, возможно то, что насканировали
+#      proto: uint8_t # номер протокола
+#      nbits: uint8_t # количество битов в посылке
+#    then:
+#       - remote_transmitter.transmit_rc_switch_raw: 
+#           repeat:
+#             times: 10
+#             wait_time: 0s
+#           protocol: !lambda 'return  esphome::remote_base::RC_SWITCH_PROTOCOLS[proto];'
+#           code: !lambda |-
+#                 uint64_t mask=1<<(nbits-1); 
+#                 std::string buff; 
+#                 while(mask){
+#                    buff += (data & mask)!=0 ? '1' : '0';                    
+#                    mask >>=1;
+#                 }         
+#                 ESP_LOGD("RC Commander","Data for RF send %s, protocol: %x", buff, proto);
+#                 return buff;
+
+  # скрипт отправки RF в виде цифры
+  # RF packet of normal (non-text) data
+  - id: send_rf
+    mode: queued
+    parameters:
+      data: uint64_t # данные для передачи, возможно то, что насканировали
+      proto: uint8_t # номер протокола
+      nbits: uint8_t # количество битов в посылке
+    then:
+       - lambda: |-
+          auto rb = esphome::remote_base::RC_SWITCH_PROTOCOLS[proto]; // настраиваем протокол
+          auto call = id(transmitter).transmit(); 
+          rb.transmit(call.get_data(), data, nbits); // устанавливаем данные для отправки
+          call.set_send_times(10); // количество повторов
+          call.set_send_wait(0); // пауза между повторами, думаю в uS
+          call.perform();
+
+button:
+# Examples of using the script
+  - platform: template
+    name: "Send 1"
+    on_press:
+      then:
+        # отправка RF посылки в стиле ESPHOME
+        - script.execute:
+            id: send_rf
+            data: 0x65602 # цфра которую получили при сканировании
+            proto: 1 # номер протокола
+            nbits: 24  # количество битов в посылке (например 101011011100010111000010 - тут 2 бита по количеству цифр, это видно когда включаем опцию dump: rc_switch
+
+  - platform: template
+    name: "Send 2"
+    on_press:
+      then: 
+        # отправка RF посылки в стиле Cи
+        - lambda: |-
+            send_rf->execute(0x65602,1,24); 
